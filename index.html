@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mesin Penghitung Presensi</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body class="bg-gray-50 min-h-screen p-8 text-gray-800">
+
+    <div class="max-w-6xl mx-auto bg-white p-6 rounded-lg shadow-md">
+        <h2 class="text-2xl font-bold mb-4 border-b pb-2 text-blue-600">Mesin Penghitung Presensi V5 (Multi-File Akumulatif)</h2>
+        
+        <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Upload File PDF Rekap Absensi (bisa lebih dari 1 file):</label>
+            <input type="file" id="pdf-upload" accept="application/pdf" multiple class="block w-full text-sm text-gray-500
+                file:mr-4 file:py-2 file:px-4
+                file:rounded-md file:border-0
+                file:text-sm file:font-semibold
+                file:bg-blue-50 file:text-blue-700
+                hover:file:bg-blue-100 border border-gray-300 rounded-md p-2">
+            <p class="text-xs text-gray-400 mt-1">Pilih beberapa file sekaligus, atau upload bertahap. Data akan diakumulasi otomatis.</p>
+        </div>
+
+        <!-- Daftar file yang sudah diupload -->
+        <div id="file-list-container" class="mb-4 hidden">
+            <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center gap-2">
+                    <span class="text-sm font-semibold text-gray-700">File yang sudah diproses:</span>
+                    <span id="file-count-badge" class="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800">0</span>
+                </div>
+                <button id="reset-btn" onclick="resetAll()" class="text-xs bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1 rounded-md font-semibold transition-colors duration-150">
+                    🗑️ Reset Semua
+                </button>
+            </div>
+            <ul id="file-list" class="text-sm text-gray-600 bg-gray-50 rounded-md p-3 space-y-1 max-h-32 overflow-y-auto"></ul>
+        </div>
+
+        <div id="loading" class="hidden text-blue-500 font-semibold mb-4">Menganalisa struktur PDF & membuang tanda tangan Wali Kelas...</div>
+
+        <!-- Info akumulasi -->
+        <div id="accumulation-info" class="hidden mb-4 bg-green-50 border border-green-200 rounded-md p-3">
+            <p class="text-sm text-green-700 font-medium">
+                ✅ Data diakumulasi dari <span id="total-files-info" class="font-bold">0</span> file. 
+                Total <span id="total-students-info" class="font-bold">0</span> siswa terdeteksi.
+            </p>
+        </div>
+
+        <div class="overflow-x-auto">
+            <table class="min-w-full bg-white border border-gray-200 rounded-lg">
+                <thead class="bg-blue-50">
+                    <tr>
+                        <th class="py-3 px-4 border-b border-gray-200 text-left text-sm font-bold text-gray-700">No</th>
+                        <th class="py-3 px-4 border-b border-gray-200 text-left text-sm font-bold text-gray-700">Nama Siswa</th>
+                        <th class="py-3 px-4 border-b border-gray-200 text-center text-sm font-bold text-blue-700">Hadir / PKL (H/P)</th>
+                        <th class="py-3 px-4 border-b border-gray-200 text-center text-sm font-bold text-yellow-600">Sakit (S)</th>
+                        <th class="py-3 px-4 border-b border-gray-200 text-center text-sm font-bold text-green-600">Izin (I)</th>
+                        <th class="py-3 px-4 border-b border-gray-200 text-center text-sm font-bold text-red-600">Tanpa Keterangan (A)</th>
+                    </tr>
+                </thead>
+                <tbody id="result-body">
+                    <!-- Data akan dimuat di sini -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // State global untuk akumulasi
+        let accumulatedData = {}; // key: nama siswa (normalized), value: {nama, hadir, sakit, izin, alpa}
+        let uploadedFiles = [];   // daftar nama file yang sudah diupload
+
+        // Normalisasi nama untuk matching lintas file
+        function normalizeName(nama) {
+            return nama.trim().replace(/\s+/g, ' ').toUpperCase();
+        }
+
+        // Ekstraksi data dari satu file PDF (mengembalikan array of {nama, absensiStr})
+        async function extractDataFromPDF(file) {
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+            
+            let allItems = [];
+            let globalColNoX = 30; 
+            let globalColNamaX = 80; 
+
+            // Tahap 1: Pemetaan Kordinat Global Sumbu X
+            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+                const page = await pdf.getPage(pageNum);
+                const textContent = await page.getTextContent();
+                
+                textContent.items.forEach(item => {
+                    let text = item.str.trim();
+                    if (!text || text === '|') return;
+
+                    if (text.toLowerCase() === 'no') globalColNoX = item.transform[4];
+                    if (text.toLowerCase() === 'nama siswa') globalColNamaX = item.transform[4];
+
+                    allItems.push({
+                        text: text,
+                        x: item.transform[4],
+                        y: item.transform[5],
+                        page: pageNum
+                    });
+                });
+            }
+
+            let extractedData = [];
+            let currentStudent = null;
+
+            // Tahap 2: Ekstraksi Baris demi Baris per Halaman
+            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+                let pageItems = allItems.filter(i => i.page === pageNum);
+                
+                let rows = [];
+                pageItems.forEach(item => {
+                    let added = false;
+                    for (let row of rows) {
+                        if (Math.abs(row.y - item.y) <= 6) {
+                            row.items.push(item);
+                            added = true;
+                            break;
+                        }
+                    }
+                    if (!added) rows.push({ y: item.y, items: [item] });
+                });
+
+                // Urutkan dari atas ke bawah
+                rows.sort((a, b) => b.y - a.y);
+                
+                let stopProcessingPage = false; // Flag pelindung bocor footer
+
+                rows.forEach(row => {
+                    if (stopProcessingPage) return; // Jika sudah kena footer, abaikan sisa baris di halaman ini
+
+                    row.items.sort((a, b) => a.x - b.x);
+                    
+                    // PELINDUNG 1: Blokir Footer (Penyebab Wulan dapat Alpa 10 hari)
+                    let isFooter = row.items.some(item => {
+                        let t = item.text.toLowerCase();
+                        return t.includes('jakarta') || t.includes('wali kelas') || t.includes('nip.') || t.includes('mengetahui');
+                    });
+                    if (isFooter) {
+                        stopProcessingPage = true;
+                        // Simpan dan reset currentStudent agar tidak bocor ke halaman berikutnya
+                        if (currentStudent && currentStudent.nama) {
+                            extractedData.push(currentStudent);
+                            currentStudent = null;
+                        }
+                        return;
+                    }
+
+                    // PELINDUNG 2: Abaikan Header Kolom dan Judul Dokumen
+                    let isHeader = row.items.some(item => {
+                        let t = item.text.toLowerCase();
+                        return t === 'no' || t.includes('nama siswa') || t.includes('tanggal') || t.includes('rekapitulasi') || t.includes('rekap absensi');
+                    });
+                    if (isHeader) return;
+
+                    let isNewStudent = false;
+                    let rowNo = "";
+                    let rowNama = "";
+                    let rowAbsensi = "";
+
+                    row.items.forEach(item => {
+                        // Abaikan teks URL / Halaman
+                        if (item.text.includes('jurnalkbm') || item.text.includes('/')) return;
+
+                        // Cek Kolom Nomor
+                        if (Math.abs(item.x - globalColNoX) < 20 && /^\d{1,3}$/.test(item.text)) {
+                            isNewStudent = true;
+                            rowNo = item.text;
+                        } else {
+                            // Bersihkan teks dari semua karakter selain huruf untuk mendeteksi S, I, A (termasuk jika ada tanda baca nempel)
+                            let textClean = item.text.replace(/[^A-Za-z]/g, '').toUpperCase();
+                            // Normalisasi huruf Yunani/Cyrillic aneh dari e-rapor menjadi abjad standar H/P
+                            textClean = textClean.replace(/[\u0397\u041D]/g, 'H').replace(/[\u03A1\u0420]/g, 'P');
+                            
+                            let isAbsenOnly = /^[HPSIA]+$/.test(textClean) || textClean === '';
+                            
+                            // Jika posisinya di kanan kolom nama DAN isinya cuma huruf absensi
+                            if (item.x > globalColNamaX + 60 && isAbsenOnly) {
+                                // Pengecekan ekstra untuk nama orang yang kebetulan HPSIA (e.g. "ASIH")
+                                if (item.x < globalColNamaX + 160 && textClean.length >= 3 && !/(.)\\1/.test(textClean) && /[AI]/i.test(textClean)) {
+                                    rowNama += (rowNama ? " " : "") + item.text;
+                                } else {
+                                    rowAbsensi += item.text;
+                                }
+                            } else {
+                                rowNama += (rowNama ? " " : "") + item.text;
+                            }
+                        }
+                    });
+
+                    // Merakit objek Siswa
+                    if (isNewStudent) {
+                        if (currentStudent && currentStudent.nama) extractedData.push(currentStudent);
+                        currentStudent = { no: rowNo, nama: rowNama.trim(), absensiStr: rowAbsensi };
+                    } else if (currentStudent) {
+                        if (rowNama) currentStudent.nama += " " + rowNama.trim();
+                        if (rowAbsensi) currentStudent.absensiStr += rowAbsensi;
+                    }
+                });
+
+                // RESET: Putus rantai currentStudent di akhir halaman agar header halaman selanjutnya 
+                // (seperti "S I A P") tidak bocor ke siswa terakhir di halaman ini.
+                if (currentStudent && currentStudent.nama) {
+                    extractedData.push(currentStudent);
+                    currentStudent = null;
+                }
+            }
+            
+            if (currentStudent && currentStudent.nama) extractedData.push(currentStudent);
+            
+            // Pembersihan artefak terakhir
+            extractedData = extractedData.filter(d => d.nama.length > 2);
+
+            return extractedData;
+        }
+
+        // Hitung presensi dari string absensi
+        function countAttendance(absensiStr) {
+            let absStr = absensiStr.toUpperCase()
+                .replace(/[\u0397\u041D]/g, 'H') 
+                .replace(/[\u03A1\u0420]/g, 'P')
+                .replace(/[^HPSIA]/g, ''); 
+            
+            return {
+                hadir: (absStr.match(/[HP]/g) || []).length,
+                sakit: (absStr.match(/S/g) || []).length,
+                izin: (absStr.match(/I/g) || []).length,
+                alpa: (absStr.match(/A/g) || []).length,
+            };
+        }
+
+        // Akumulasi data dari file baru ke state global
+        function accumulateData(extractedData) {
+            extractedData.forEach(data => {
+                const key = normalizeName(data.nama);
+                const counts = countAttendance(data.absensiStr);
+
+                if (accumulatedData[key]) {
+                    // Siswa sudah ada, akumulasi
+                    accumulatedData[key].hadir += counts.hadir;
+                    accumulatedData[key].sakit += counts.sakit;
+                    accumulatedData[key].izin += counts.izin;
+                    accumulatedData[key].alpa += counts.alpa;
+                } else {
+                    // Siswa baru
+                    accumulatedData[key] = {
+                        nama: data.nama, // Simpan nama asli (bukan normalized)
+                        hadir: counts.hadir,
+                        sakit: counts.sakit,
+                        izin: counts.izin,
+                        alpa: counts.alpa,
+                    };
+                }
+            });
+        }
+
+        // Render tabel dari state akumulasi
+        function renderTable() {
+            const tbody = document.getElementById('result-body');
+            tbody.innerHTML = '';
+
+            // Urutkan berdasarkan nama
+            const sortedStudents = Object.values(accumulatedData).sort((a, b) => a.nama.localeCompare(b.nama));
+
+            sortedStudents.forEach((data, idx) => {
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-gray-100 transition-colors duration-150";
+                tr.innerHTML = `
+                    <td class="py-2 px-4 border-b border-gray-200 text-sm text-gray-700">${idx + 1}</td>
+                    <td class="py-2 px-4 border-b border-gray-200 text-sm text-gray-700 font-medium">${data.nama}</td>
+                    <td class="py-2 px-4 border-b border-gray-200 text-sm text-center text-blue-700 font-bold bg-blue-50/30">${data.hadir}</td>
+                    <td class="py-2 px-4 border-b border-gray-200 text-sm text-center text-yellow-600 font-bold bg-yellow-50/30">${data.sakit}</td>
+                    <td class="py-2 px-4 border-b border-gray-200 text-sm text-center text-green-600 font-bold bg-green-50/30">${data.izin}</td>
+                    <td class="py-2 px-4 border-b border-gray-200 text-sm text-center text-red-600 font-bold bg-red-50/30">${data.alpa}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // Update info akumulasi
+            const accInfoEl = document.getElementById('accumulation-info');
+            const totalFilesInfo = document.getElementById('total-files-info');
+            const totalStudentsInfo = document.getElementById('total-students-info');
+            
+            if (sortedStudents.length > 0) {
+                accInfoEl.classList.remove('hidden');
+                totalFilesInfo.textContent = uploadedFiles.length;
+                totalStudentsInfo.textContent = sortedStudents.length;
+            } else {
+                accInfoEl.classList.add('hidden');
+            }
+        }
+
+        // Update daftar file di UI
+        function updateFileList() {
+            const container = document.getElementById('file-list-container');
+            const list = document.getElementById('file-list');
+            const badge = document.getElementById('file-count-badge');
+
+            if (uploadedFiles.length === 0) {
+                container.classList.add('hidden');
+                return;
+            }
+
+            container.classList.remove('hidden');
+            badge.textContent = uploadedFiles.length;
+            list.innerHTML = '';
+
+            uploadedFiles.forEach((name, idx) => {
+                const li = document.createElement('li');
+                li.className = "flex items-center gap-2";
+                li.innerHTML = `<span class="text-blue-500">📄</span> <span class="text-gray-700">${idx + 1}. ${name}</span>`;
+                list.appendChild(li);
+            });
+        }
+
+        // Reset semua data
+        function resetAll() {
+            accumulatedData = {};
+            uploadedFiles = [];
+            document.getElementById('result-body').innerHTML = '';
+            document.getElementById('pdf-upload').value = '';
+            document.getElementById('accumulation-info').classList.add('hidden');
+            updateFileList();
+        }
+
+        // Event listener untuk upload
+        document.getElementById('pdf-upload').addEventListener('change', async function(e) {
+            const files = Array.from(e.target.files);
+            if (files.length === 0) return;
+
+            const loadingEl = document.getElementById('loading');
+            loadingEl.classList.remove('hidden');
+
+            try {
+                // Proses setiap file satu per satu
+                for (const file of files) {
+                    // Cek apakah file sudah pernah diupload (by name)
+                    if (uploadedFiles.includes(file.name)) {
+                        console.warn(`File "${file.name}" sudah pernah diupload, dilewati.`);
+                        continue;
+                    }
+
+                    loadingEl.textContent = `Memproses file: ${file.name}...`;
+                    
+                    const extractedData = await extractDataFromPDF(file);
+                    accumulateData(extractedData);
+                    uploadedFiles.push(file.name);
+                }
+
+                updateFileList();
+                renderTable();
+
+            } catch (error) {
+                console.error('Error membaca PDF:', error);
+                alert('Terjadi kesalahan saat memproses data: ' + error.message);
+            } finally {
+                loadingEl.classList.add('hidden');
+                loadingEl.textContent = 'Menganalisa struktur PDF & membuang tanda tangan Wali Kelas...';
+                // Reset input agar bisa upload file yang sama lagi jika perlu
+                e.target.value = '';
+            }
+        });
+    </script>
+</body>
+</html>
