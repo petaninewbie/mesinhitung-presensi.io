@@ -57,6 +57,7 @@
                         <th class="py-3 px-4 border-b border-gray-200 text-center text-sm font-bold text-yellow-600">Sakit (S)</th>
                         <th class="py-3 px-4 border-b border-gray-200 text-center text-sm font-bold text-green-600">Izin (I)</th>
                         <th class="py-3 px-4 border-b border-gray-200 text-center text-sm font-bold text-red-600">Tanpa Keterangan (A)</th>
+                        <th class="py-3 px-4 border-b border-gray-200 text-center text-sm font-bold text-purple-700">Persentase Kehadiran</th>
                     </tr>
                 </thead>
                 <tbody id="result-body">
@@ -270,6 +271,9 @@
             const sortedStudents = Object.values(accumulatedData).sort((a, b) => a.nama.localeCompare(b.nama));
 
             sortedStudents.forEach((data, idx) => {
+                const totalDays = data.hadir + data.sakit + data.izin + data.alpa;
+                const percentage = totalDays === 0 ? 0 : Math.round((data.hadir / totalDays) * 100);
+
                 const tr = document.createElement('tr');
                 tr.className = "hover:bg-gray-100 transition-colors duration-150";
                 tr.innerHTML = `
@@ -279,6 +283,7 @@
                     <td class="py-2 px-4 border-b border-gray-200 text-sm text-center text-yellow-600 font-bold bg-yellow-50/30">${data.sakit}</td>
                     <td class="py-2 px-4 border-b border-gray-200 text-sm text-center text-green-600 font-bold bg-green-50/30">${data.izin}</td>
                     <td class="py-2 px-4 border-b border-gray-200 text-sm text-center text-red-600 font-bold bg-red-50/30">${data.alpa}</td>
+                    <td class="py-2 px-4 border-b border-gray-200 text-sm text-center text-purple-700 font-bold bg-purple-50/30">${percentage}%</td>
                 `;
                 tbody.appendChild(tr);
             });
